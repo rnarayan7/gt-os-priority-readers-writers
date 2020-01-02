@@ -4,12 +4,20 @@
 #include <unistd.h>
 #include <pthread.h>
 
-// Let us create a global variable to change it in threads
-pthread_t r_tid[5];
-pthread_t w_tid[5];
+// Constants
+#define NUM_READERS 5
+#define NUM_READS 5
+#define NUM_WRITERS 5
+#define NUM_WRITES 5
+
+// Variables
+pthread_t r_tid[NUM_READERS];
+pthread_t w_tid[NUM_WRITERS];
+pthread_cond_t r_cond;
 pthread_cond_t w_cond;
 pthread_mutex_t mut;
 int g = 0;
+int r_current = 0;
 int r_waiting = 0;
 
 // Reader
@@ -18,27 +26,31 @@ void *reader(void *vargp)
     // Store the value argument passed to this thread
     int *id = (int *)vargp;
 
-    // Add to readers waiting
-    ++r_waiting;
+    for(int i = 0; i<NUM_READS; ++i){
 
-    // Sleep for some time
-    sleep(rand() % 10);
+        // Sleep for some time
+        usleep(1000 * (random() % NUM_READERS + NUM_WRITERS));
 
-    // Acquire mutex
-    pthread_mutex_lock(&mut);
+        // Enter critical section
+        pthread_mutex_lock(&mut);
+            r_waiting++;
+            while (r_current == -1){
+                pthread_cond_wait(&r_cond, &mut);
+            }
+            r_waiting--;
+            int current = r_current++;
+        pthread_mutex_unlock(&mut);
 
-    // Print the argument, static and global variables
-    printf("Reader thread ID: %d, Current: %d\n", *id, g);
+        // Print the argument, static and global variables
+        printf("Reader thread ID: %d, Global: %d, Readers: %d\n", *id, g, current);
 
-    // Unlock mutex
-    pthread_mutex_unlock(&mut);
-
-    // Remove from readers waiting
-    --r_waiting;
-
-    // Signal writer availability condition
-    if (r_waiting == 0) {
-        pthread_cond_signal(&w_cond);
+        // Exit critical section
+        pthread_mutex_lock(&mut);
+            r_current--;
+            if (r_current == 0) {
+                pthread_cond_signal(&w_cond);
+            }
+        pthread_mutex_unlock(&mut);
     }
 
     return NULL;
@@ -50,24 +62,34 @@ void *writer(void *vargp)
     // Store the value argument passed to this thread
     int *id = (int *)vargp;
 
-    // Sleep for some time
-    sleep(rand() % 2);
+    for(int i = 0; i < NUM_WRITES; ++i){
 
-    // Acquire mutex
-    pthread_mutex_lock(&mut);
+        // Sleep for some time
+        usleep(1000 * (random() % NUM_READERS + NUM_WRITERS));
 
-        // Check to see that no readers waiting
-        while (r_waiting > 0) {
-            pthread_cond_wait(&w_cond, &mut);
-        }
+        // Enter critical section
+        pthread_mutex_lock(&mut);
+            while (r_current != 0) {
+                pthread_cond_wait(&w_cond, &mut);
+            }
+            r_current = -1;
+            int current = r_current;
+            int prev = g;
+            ++g;
+        pthread_mutex_unlock(&mut);
 
-        // Print the argument, static and global variables
-        int prev = g;
-        ++g;
-        printf("Writer thread ID: %d, Previous: %d, New: %d\n", *id, prev, g);
+        printf("Writer thread ID: %d, Previous: %d, New: %d, Readers: %d\n", *id, prev, g, current);
 
-    // Unlock mutex
-    pthread_mutex_unlock(&mut);
+        // Exit critical section
+        pthread_mutex_lock(&mut);
+            r_current = 0;
+            if (r_waiting > 0) {
+                pthread_cond_broadcast(&r_cond);
+            } else {
+                pthread_cond_signal(&w_cond);
+            }
+        pthread_mutex_unlock(&mut);
+    }
 
     return NULL;
 }
@@ -76,40 +98,34 @@ int main()
 {
     int i, rc;
 
+    srandom((unsigned int)time(NULL));
+
     // Create mutex
     rc = pthread_mutex_init(&mut, NULL);
-    if (rc == -1){
-        perror("error in pthread_mutex_init");
-        exit(1);
-    }
 
     // Initialize condition variable
     rc = pthread_cond_init(&w_cond, NULL);
-    if (rc == -1){
-        perror("error in pthread_cond_init");
-        exit(1);
+    rc = pthread_cond_init(&r_cond, NULL);
+
+    // Create three reader threads
+    for (i = 0; i < NUM_READERS; i++){
+        rc = pthread_create(&r_tid[i], NULL, writer, &w_tid[i]);
     }
 
     // Create three writer threads
-    for (i = 0; i < 3; i++){
-        rc = pthread_create(&w_tid[i], NULL, writer, &w_tid[i]);
-        if (rc == -1) {
-            perror("error in pthread_create");
-            exit(1);
-        }
+    for (i = 0; i < NUM_WRITERS; i++){
+        rc = pthread_create(&w_tid[i], NULL, reader, &r_tid[i]);
     }
 
-    // Create three reader threads
-    for (i = 0; i < 3; i++){
-        rc = pthread_create(&r_tid[i], NULL, reader, &r_tid[i]);
-        if (rc == -1) {
-            perror("error in pthread_create");
-            exit(1);
-        }
-    }
+    // Wait on readers to finish
+	for(i = 0; i < NUM_READERS; i++) {
+		pthread_join(r_tid[i], NULL);
+	}
 
-    // Destroy lock
-    pthread_mutex_destroy(&mut);
+	// Wait on writers to finish
+	for(i = 0; i < NUM_WRITERS; i++) {
+		pthread_join(w_tid[i], NULL);
+	}
 
     pthread_exit(NULL);
     return 0;
